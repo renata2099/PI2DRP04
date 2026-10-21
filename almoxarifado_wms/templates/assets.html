@@ -1,2 +1,41 @@
-{% extends 'base.html' %}{% block title %}Equipamentos{% endblock %}{% block content %}<header><div><small>PATRIMÔNIO</small><h1>Equipamentos</h1><p>Disponibilidade, localização e cobrança.</p></div></header><details class="panel form-panel"><summary>Novo equipamento</summary><form method="post" class="grid-form"><label>Modelo<select name="item_id">{% for i in items %}<option value="{{i.id}}">{{i.name}}</option>{% endfor %}</select></label><label>Filial<select name="branch_id">{% for b in branches %}<option value="{{b.id}}">{{b.code}} · {{b.name}}</option>{% endfor %}</select></label><label>Depósito<select name="warehouse_id">{% for w in warehouses %}<option value="{{w.id}}">{{w.name}}</option>{% endfor %}</select></label><label>Patrimônio/etiqueta<input name="asset_tag" required></label><label>Número de série<input name="serial_number"></label><label>Diária R$<input type="number" step="0.01" name="daily_rate" value="0"></label><label>Multa/dia R$<input type="number" step="0.01" name="late_fee_daily" value="0"></label><label>Observação<input name="notes"></label><button>Cadastrar equipamento</button></form></details><section class="cards">{% for a in assets %}<a class="asset-card" href="{{url_for('asset_detail',asset_id=a.id)}}"><div class="asset-top"><span class="badge {{'green' if a.status=='AVAILABLE' else 'amber'}}">{{a.status}}</span><code>{{a.asset_tag}}</code></div><h3>{{a.item.name}}</h3><p>{{a.branch.name}} · {{a.warehouse.name}}</p><div><span>Série {{a.serial_number or '-'}}</span><b>R$ {{'%.2f'|format(a.daily_rate)}}/dia</b></div></a>{% else %}<div class="empty">Nenhum equipamento cadastrado.</div>{% endfor %}</section>{% endblock %}
-
+{% extends 'base.html' %}
+{% block title %}Equipamentos{% endblock %}
+{% block content %}
+<header><div><small>PATRIMÔNIO</small><h1>Equipamentos</h1><p>Pesquise por patrimônio, modelo, série, filial ou depósito.</p></div></header>
+<details class="panel form-panel"><summary>＋ Cadastrar novo equipamento</summary>
+  <form method="post" class="grid-form">
+    <label>Modelo<select name="item_id" required>{% for i in items %}<option value="{{i.id}}">{{i.sku}} · {{i.name}}</option>{% endfor %}</select></label>
+    <label>Filial<select name="branch_id" required>{% for b in branches %}<option value="{{b.id}}">{{b.code}} · {{b.name}}</option>{% endfor %}</select></label>
+    <label>Depósito<select name="warehouse_id" required>{% for w in warehouses %}<option value="{{w.id}}">{{w.branch.code}} · {{w.name}}</option>{% endfor %}</select></label>
+    <label>Patrimônio/etiqueta<input name="asset_tag" required maxlength="60"></label>
+    <label>Número de série<input name="serial_number" maxlength="100"></label>
+    <label>Condição<select name="condition" required><option value="NEW">Novo</option><option value="USED">Usado</option><option value="DISPOSAL">Descarte</option></select></label>
+    <label>Diária R$<input type="number" step="0.01" min="0" name="daily_rate" value="0"></label>
+    <label>Multa/dia R$<input type="number" step="0.01" min="0" name="late_fee_daily" value="0"></label>
+    <label>Observação<input name="notes"></label><button>Cadastrar equipamento</button>
+  </form>
+</details>
+<section class="panel search-panel">
+  <div class="search-heading"><div><h2>Buscar no patrimônio</h2><p>{{ assets|length }} resultado(s) de {{ total_assets }} equipamento(s)</p></div></div>
+  <form method="get" class="filter-bar" role="search">
+    <label class="filter-search">Pesquisa<input name="q" type="search" value="{{search}}" placeholder="Patrimônio, série, modelo, SKU..." autocomplete="off"></label>
+    <label>Condição<select name="condition"><option value="">Todas</option><option value="NEW" {% if selected_condition=='NEW' %}selected{% endif %}>Novo</option><option value="USED" {% if selected_condition=='USED' %}selected{% endif %}>Usado</option><option value="DISPOSAL" {% if selected_condition=='DISPOSAL' %}selected{% endif %}>Descarte</option><option value="UNSPECIFIED" {% if selected_condition=='UNSPECIFIED' %}selected{% endif %}>A classificar (legado)</option></select></label>
+    <label>Disponibilidade<select name="status"><option value="">Todas</option>{% for value, label in asset_status_labels.items() %}<option value="{{value}}" {% if selected_status==value %}selected{% endif %}>{{label}}</option>{% endfor %}</select></label>
+    <button type="submit">Pesquisar</button>
+    <a class="btn-soft" href="{{ url_for('assets') }}">Limpar</a>
+    <button class="btn-soft" type="submit" name="export" value="csv">↓ CSV</button>
+  </form>
+</section>
+<section class="cards">
+{% for a in assets %}
+  {% set loan = holder_by_asset.get(a.id) %}
+  <a class="asset-card{% if a.condition=='DISPOSAL' %} asset-disposal{% endif %}" href="{{ url_for('asset_detail',asset_id=a.id) }}">
+    <div class="asset-top"><span class="badge {{ 'green' if a.status=='AVAILABLE' else 'red' if a.status=='DISCARDED' else 'amber' }}">{{ asset_status_labels.get(a.status, a.status) }}</span><code>{{ a.asset_tag }}</code></div>
+    <h3>{{ a.item.name }}</h3><p>{{ a.branch.name }} · {{ a.warehouse.name }}</p>
+    <p class="asset-condition"><span class="badge {{ 'green' if a.condition=='NEW' else 'amber' if a.condition=='USED' else 'red' if a.condition=='DISPOSAL' else '' }}">{{ condition_labels.get(a.condition, 'A classificar') }}</span><span>Série: {{ a.serial_number or '-' }}</span></p>
+    {% if loan %}<p class="holder"><b>{{ 'Com: ' if loan.status=='ACTIVE' else 'Reservado para: ' }}</b>{{ loan.party.name }}</p>{% elif a.status=='AVAILABLE' %}<p class="holder muted">Disponível para empréstimo</p>{% elif a.status=='DISCARDED' %}<p class="holder muted">Fora de circulação</p>{% endif %}
+    <div class="asset-footer"><span>Ver ficha e QR Code →</span><b>R$ {{'%.2f'|format(a.daily_rate)}}/dia</b></div>
+  </a>
+{% else %}<div class="empty">Nenhum equipamento encontrado para estes filtros.</div>{% endfor %}
+</section>
+{% endblock %}

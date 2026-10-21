@@ -5,20 +5,58 @@ from decimal import Decimal
 from functools import wraps
 from pathlib import Path
 from uuid import uuid4
+import csv
+
+from sqlalchemy import inspect, or_, text
 
 import qrcode
 from dotenv import load_dotenv
 from flask import Flask, abort, flash, redirect, render_template, request, send_file, send_from_directory, url_for
 from flask_login import LoginManager, current_user, login_required, login_user, logout_user
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
 from werkzeug.utils import secure_filename
 
 load_dotenv()
 from config import Config
 from models import Asset, AssetPhoto, Branch, Item, Loan, LoanEvent, Party, StockBalance, StockMovement, User, Warehouse, db, now
+from loan_pdf import generate_loan_term
 
 ALLOWED_IMAGES = {"png", "jpg", "jpeg", "webp"}
+ITEM_CONDITIONS = {"NEW": "Novo", "USED": "Usado", "DISPOSAL": "Descarte"}
+CONDITION_LABELS = {**ITEM_CONDITIONS, "GOOD": "A classificar", "DAMAGED": "A classificar", "UNSPECIFIED": "A classificar"}
+ASSET_STATUS_LABELS = {"AVAILABLE": "Disponível", "RESERVED": "Reservado", "LOANED": "Emprestado / locado", "MAINTENANCE": "Manutenção", "DISCARDED": "Descartado"}
+
+
+def ensure_item_condition_column(app):
+    """Migração aditiva e idempotente no SQLite existente, sem recriar o banco."""
+    with app.app_context():
+        engine = db.engine
+        if engine.dialect.name != "sqlite":
+            return
+        inspector = inspect(engine)
+        if inspector.has_table("items") and "condition" not in {c["name"] for c in inspector.get_columns("items")}:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE items ADD COLUMN condition VARCHAR(20) NOT NULL DEFAULT 'UNSPECIFIED'"))
+
+
+def clean_condition(value):
+    return value if value in ITEM_CONDITIONS else None
+
+
+def csv_text(value):
+    """Previne interpretação de texto dos cadastros como fórmulas em planilhas."""
+    value = str(value if value is not None else "")
+    if value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def csv_response(filename, headers, rows):
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=";")
+    writer.writerow(headers)
+    writer.writerows([[csv_text(v) for v in row] for row in rows])
+    return send_file(io.BytesIO(("\ufeff" + output.getvalue()).encode("utf-8")),
+                     mimetype="text/csv; charset=utf-8", as_attachment=True, download_name=filename)
 
 def create_app(test_config=None):
     app = Flask(__name__)
@@ -26,6 +64,7 @@ def create_app(test_config=None):
     if test_config: app.config.update(test_config)
     Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
     db.init_app(app)
+    ensure_item_condition_column(app)
     login = LoginManager(app)
     login.login_view = "login"
     login.login_message = "Entre para acessar o sistema."
@@ -48,7 +87,8 @@ def create_app(test_config=None):
         return query
 
     @app.context_processor
-    def globals_(): return {"company_name": app.config["COMPANY_NAME"], "now": now}
+    def globals_(): return {"company_name": app.config["COMPANY_NAME"], "now": now,
+                            "condition_labels": CONDITION_LABELS, "asset_status_labels": ASSET_STATUS_LABELS}
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
@@ -77,9 +117,55 @@ def create_app(test_config=None):
     def items():
         if request.method == "POST":
             if not current_user.can("admin", "manager", "operator"): abort(403)
-            db.session.add(Item(sku=request.form["sku"].strip(), name=request.form["name"].strip(), category=request.form.get("category"), item_type=request.form["item_type"], unit=request.form.get("unit", "UN"), minimum_stock=Decimal(request.form.get("minimum_stock") or "0")))
+            category = request.form.get("category", "").strip()
+            if category == "__new__":
+                category = request.form.get("new_category", "").strip()
+            if len(category) > 80 or (request.form.get("category") == "__new__" and not category):
+                flash("Informe uma categoria válida (até 80 caracteres).", "danger")
+                return redirect(url_for("items"))
+            # Reaproveita a grafia de uma categoria já cadastrada.
+            existing = next((c for (c,) in db.session.query(Item.category).distinct().all()
+                             if c and c.strip().casefold() == category.casefold()), None)
+            category = existing.strip() if existing else (category or None)
+            condition = clean_condition(request.form.get("condition", "NEW"))
+            if not condition:
+                flash("Selecione uma condição válida.", "danger")
+                return redirect(url_for("items"))
+            db.session.add(Item(sku=request.form["sku"].strip(), name=request.form["name"].strip(), category=category,
+                                condition=condition, item_type=request.form["item_type"], unit=request.form.get("unit", "UN"),
+                                minimum_stock=Decimal(request.form.get("minimum_stock") or "0")))
             db.session.commit(); flash("Item cadastrado.", "success"); return redirect(url_for("items"))
-        return render_template("items.html", items=Item.query.order_by(Item.name).all())
+        all_items = Item.query.order_by(Item.name).all()
+        categories = sorted({i.category.strip() for i in all_items if i.category and i.category.strip()}, key=str.casefold)
+        search = request.args.get("q", "").strip()[:120]
+        kind = request.args.get("type", "")
+        condition = request.args.get("condition", "")
+        query = Item.query
+        if search:
+            phrase = f"%{search}%"
+            query = query.filter(or_(Item.sku.ilike(phrase), Item.name.ilike(phrase), Item.category.ilike(phrase)))
+        if kind in ("STOCK", "EQUIPMENT"):
+            query = query.filter_by(item_type=kind)
+        if condition in ITEM_CONDITIONS or condition == "UNSPECIFIED":
+            query = query.filter_by(condition=condition)
+        listed = query.order_by(Item.name).all()
+        if request.args.get("export") == "csv":
+            return csv_response("itens_wms.csv", ["SKU", "Nome", "Categoria", "Tipo", "Condição", "Unidade", "Mínimo"],
+                                [(i.sku, i.name, i.category or "", i.item_type, CONDITION_LABELS.get(i.condition, "A classificar"), i.unit, i.minimum_stock) for i in listed])
+        return render_template("items.html", items=listed, categories=categories, search=search,
+                               selected_type=kind, selected_condition=condition, total=len(all_items))
+
+    @app.route("/items/<int:item_id>/condition", methods=["POST"])
+    @login_required
+    def item_condition(item_id):
+        if not current_user.can("admin", "manager", "operator"): abort(403)
+        item = Item.query.get_or_404(item_id)
+        condition = clean_condition(request.form.get("condition"))
+        if not condition: abort(400)
+        item.condition = condition
+        db.session.commit()
+        flash(f"Condição do item {item.sku} atualizada.", "success")
+        return redirect(url_for("items"))
 
     @app.route("/stock", methods=["GET", "POST"])
     @login_required
@@ -97,21 +183,114 @@ def create_app(test_config=None):
             db.session.add(StockMovement(item_id=item_id, warehouse_id=wh_id, movement_type=kind, quantity=qty, reference=request.form.get("reference"), notes=request.form.get("notes"), user_id=current_user.id))
             db.session.commit(); flash("Movimentação registrada.", "success"); return redirect(url_for("stock"))
         warehouses = Warehouse.query.order_by(Warehouse.name).all()
-        return render_template("stock.html", balances=StockBalance.query.all(), movements=StockMovement.query.order_by(StockMovement.created_at.desc()).limit(30), items=Item.query.filter_by(item_type="STOCK", active=True).all(), warehouses=warehouses)
+        search = request.args.get("q", "").strip()[:120]
+        condition = request.args.get("condition", "")
+        balance_query = StockBalance.query.join(Item).join(Warehouse)
+        if search:
+            phrase = f"%{search}%"
+            balance_query = balance_query.filter(or_(Item.sku.ilike(phrase), Item.name.ilike(phrase),
+                                                    Item.category.ilike(phrase), Warehouse.name.ilike(phrase)))
+        if condition in ITEM_CONDITIONS or condition == "UNSPECIFIED":
+            balance_query = balance_query.filter(Item.condition == condition)
+        balances = balance_query.order_by(Item.name, Warehouse.name).all()
+        if request.args.get("export") == "csv":
+            return csv_response("saldos_wms.csv", ["SKU", "Item", "Categoria", "Condição", "Depósito", "Saldo", "Unidade", "Mínimo", "Situação"],
+                                [(b.item.sku, b.item.name, b.item.category or "", CONDITION_LABELS.get(b.item.condition, "A classificar"),
+                                  b.warehouse.name, b.quantity, b.item.unit, b.item.minimum_stock,
+                                  "Repor" if b.quantity <= b.item.minimum_stock else "Em dia") for b in balances])
+        total_balances = StockBalance.query.count()
+        low_count = StockBalance.query.join(Item).filter(StockBalance.quantity <= Item.minimum_stock).count()
+        return render_template("stock.html", balances=balances, movements=StockMovement.query.order_by(StockMovement.created_at.desc()).limit(30),
+                               items=Item.query.filter_by(item_type="STOCK", active=True).order_by(Item.name).all(),
+                               warehouses=warehouses, search=search, selected_condition=condition,
+                               total_balances=total_balances, low_count=low_count)
 
     @app.route("/assets", methods=["GET", "POST"])
     @login_required
     def assets():
         if request.method == "POST":
             if not current_user.can("admin", "manager", "operator"): abort(403)
-            asset = Asset(item_id=int(request.form["item_id"]), branch_id=int(request.form["branch_id"]), warehouse_id=int(request.form["warehouse_id"]), asset_tag=request.form["asset_tag"].strip(), serial_number=request.form.get("serial_number"), daily_rate=Decimal(request.form.get("daily_rate") or "0"), late_fee_daily=Decimal(request.form.get("late_fee_daily") or "0"), notes=request.form.get("notes"))
+            condition = clean_condition(request.form.get("condition", "NEW"))
+            if not condition:
+                flash("Selecione uma condição válida.", "danger")
+                return redirect(url_for("assets"))
+            asset = Asset(item_id=int(request.form["item_id"]), branch_id=int(request.form["branch_id"]), warehouse_id=int(request.form["warehouse_id"]), asset_tag=request.form["asset_tag"].strip(), serial_number=request.form.get("serial_number"), daily_rate=Decimal(request.form.get("daily_rate") or "0"), late_fee_daily=Decimal(request.form.get("late_fee_daily") or "0"), notes=request.form.get("notes"), condition=condition, status="DISCARDED" if condition == "DISPOSAL" else "AVAILABLE")
             db.session.add(asset); db.session.commit(); flash("Equipamento cadastrado.", "success"); return redirect(url_for("asset_detail", asset_id=asset.id))
+        search = request.args.get("q", "").strip()[:120]
+        status = request.args.get("status", "")
+        condition = request.args.get("condition", "")
         query = branch_scope(Asset.query, Asset)
-        return render_template("assets.html", assets=query.order_by(Asset.asset_tag).all(), items=Item.query.filter_by(item_type="EQUIPMENT", active=True).all(), branches=Branch.query.filter_by(active=True).all(), warehouses=Warehouse.query.filter_by(active=True).all())
+        if search:
+            phrase = f"%{search}%"
+            query = query.join(Item).outerjoin(Branch).outerjoin(Warehouse).filter(or_(
+                Asset.asset_tag.ilike(phrase), Asset.serial_number.ilike(phrase), Item.name.ilike(phrase),
+                Item.sku.ilike(phrase), Item.category.ilike(phrase), Branch.name.ilike(phrase), Warehouse.name.ilike(phrase)))
+        if status in ASSET_STATUS_LABELS:
+            query = query.filter(Asset.status == status)
+        if condition in ITEM_CONDITIONS:
+            query = query.filter(Asset.condition == condition)
+        elif condition == "UNSPECIFIED":
+            query = query.filter(~Asset.condition.in_(ITEM_CONDITIONS))
+        listed_assets = query.order_by(Asset.asset_tag).all()
+        # Mantém responsável atual também na tela de patrimônio.
+        current_loans = Loan.query.filter(Loan.asset_id.in_([a.id for a in listed_assets]),
+                                          Loan.status.in_(["PENDING", "ACTIVE"])).order_by(Loan.requested_at.desc()).all() if listed_assets else []
+        holder_by_asset = {}
+        for loan in current_loans:
+            holder_by_asset.setdefault(loan.asset_id, loan)
+        if request.args.get("export") == "csv":
+            return csv_response("equipamentos_wms.csv", ["Patrimônio", "Modelo", "SKU", "Série", "Condição", "Disponibilidade", "Filial", "Depósito", "Responsável"],
+                                [(a.asset_tag, a.item.name, a.item.sku, a.serial_number or "", CONDITION_LABELS.get(a.condition, "A classificar"),
+                                  ASSET_STATUS_LABELS.get(a.status, a.status), a.branch.name, a.warehouse.name,
+                                  holder_by_asset[a.id].party.name if a.id in holder_by_asset else "") for a in listed_assets])
+        return render_template("assets.html", assets=listed_assets, holder_by_asset=holder_by_asset,
+                               items=Item.query.filter_by(item_type="EQUIPMENT", active=True).order_by(Item.name).all(),
+                               branches=Branch.query.filter_by(active=True).all(), warehouses=Warehouse.query.filter_by(active=True).all(),
+                               search=search, selected_status=status, selected_condition=condition,
+                               total_assets=branch_scope(Asset.query, Asset).count())
+
+    @app.route("/assets/<int:asset_id>/condition", methods=["POST"])
+    @login_required
+    def asset_condition(asset_id):
+        if not current_user.can("admin", "manager", "operator"): abort(403)
+        asset = branch_scope(Asset.query, Asset).filter(Asset.id == asset_id).first_or_404()
+        condition = clean_condition(request.form.get("condition"))
+        if not condition: abort(400)
+        if condition == "DISPOSAL" and asset.status in {"LOANED", "RESERVED"}:
+            flash("Não é possível descartar um equipamento com reserva ou empréstimo em andamento.", "danger")
+            return redirect(url_for("asset_detail", asset_id=asset.id))
+        previous_condition = asset.condition
+        asset.condition = condition
+        if condition == "DISPOSAL":
+            asset.status = "DISCARDED"
+        elif previous_condition == "DISPOSAL" and asset.status == "DISCARDED":
+            asset.status = "AVAILABLE"
+        db.session.commit()
+        flash("Condição atualizada.", "success")
+        return redirect(url_for("asset_detail", asset_id=asset.id))
+
+    @app.route("/assets/<int:asset_id>/release", methods=["POST"])
+    @login_required
+    def asset_release(asset_id):
+        if not current_user.can("admin", "manager", "operator"): abort(403)
+        asset = branch_scope(Asset.query, Asset).filter(Asset.id == asset_id).first_or_404()
+        if asset.status != "MAINTENANCE": abort(400)
+        if Loan.query.filter(Loan.asset_id == asset.id, Loan.status.in_(["PENDING", "ACTIVE"])).first():
+            flash("Há empréstimo ou reserva em andamento para este patrimônio.", "danger")
+            return redirect(url_for("asset_detail", asset_id=asset.id))
+        asset.condition = "USED"
+        asset.status = "AVAILABLE"
+        db.session.commit()
+        flash("Patrimônio liberado após manutenção.", "success")
+        return redirect(url_for("asset_detail", asset_id=asset.id))
 
     @app.route("/assets/<int:asset_id>")
     @login_required
-    def asset_detail(asset_id): return render_template("asset_detail.html", asset=Asset.query.get_or_404(asset_id))
+    def asset_detail(asset_id):
+        asset = branch_scope(Asset.query, Asset).filter(Asset.id == asset_id).first_or_404()
+        current_loan = Loan.query.filter(Loan.asset_id == asset.id, Loan.status.in_(["PENDING", "ACTIVE"]))\
+            .order_by(Loan.requested_at.desc()).first()
+        return render_template("asset_detail.html", asset=asset, current_loan=current_loan)
 
     @app.route("/assets/<int:asset_id>/photo", methods=["POST"])
     @login_required
@@ -181,7 +360,9 @@ def create_app(test_config=None):
         elif action == "reject" and loan.status == "PENDING":
             loan.status="REJECTED"; loan.asset.status="AVAILABLE"; event="REJECTED"
         elif action == "return" and loan.status == "ACTIVE":
-            loan.status="RETURNED"; loan.returned_at=now(); loan.return_condition=request.form.get("return_condition", "GOOD"); loan.asset.condition=loan.return_condition; loan.asset.status="AVAILABLE" if loan.return_condition != "DAMAGED" else "MAINTENANCE"; event="RETURNED"
+            loan.status="RETURNED"; loan.returned_at=now(); loan.return_condition=request.form.get("return_condition", "GOOD")
+            if loan.return_condition not in {"GOOD", "DAMAGED"}: abort(400)
+            loan.asset.condition="USED"; loan.asset.status="AVAILABLE" if loan.return_condition == "GOOD" else "MAINTENANCE"; event="RETURNED"
         elif action == "pay" and loan.status in {"ACTIVE", "RETURNED"}:
             loan.paid_amount = Decimal(loan.paid_amount or 0) + Decimal(request.form.get("amount") or "0"); event="PAYMENT"
         else: abort(400)
@@ -190,12 +371,9 @@ def create_app(test_config=None):
     @app.route("/loans/<int:loan_id>/term")
     @login_required
     def loan_term(loan_id):
-        loan = Loan.query.get_or_404(loan_id); b = io.BytesIO(); c = canvas.Canvas(b, pagesize=A4); width, height = A4
-        c.setFont("Helvetica-Bold", 15); c.drawCentredString(width/2, height-60, "TERMO DE RESPONSABILIDADE / LOCAÇÃO")
-        c.setFont("Helvetica", 10); y=height-105
-        lines=[f"Empresa: {app.config['COMPANY_NAME']}", f"Termo nº: {loan.id}", f"Responsável: {loan.party.name}", f"Documento: {loan.party.document or '-'}", f"Equipamento: {loan.asset.item.name}", f"Patrimônio: {loan.asset.asset_tag}", f"Número de série: {loan.asset.serial_number or '-'}", f"Modalidade: {'Locação' if loan.kind == 'RENTAL' else 'Empréstimo'}", f"Data limite para devolução: {loan.due_at:%d/%m/%Y %H:%M}", f"Valor diário: R$ {loan.daily_rate:.2f}", f"Multa diária por atraso: R$ {loan.late_fee_daily:.2f}", "", "Declaro que recebi o equipamento acima e assumo responsabilidade por sua guarda,", "uso adequado e devolução nas condições e no prazo acordados.", "", "Assinatura do responsável: ______________________________________________", "", "Assinatura da empresa: _________________________________________________"]
-        for line in lines: c.drawString(55,y,line); y-=20
-        c.save(); b.seek(0); return send_file(b, mimetype="application/pdf", download_name=f"termo-{loan.id}.pdf")
+        loan = Loan.query.get_or_404(loan_id)
+        document = generate_loan_term(loan, app.config["COMPANY_NAME"])
+        return send_file(document, mimetype="application/pdf", download_name=f"termo-{loan.id}.pdf")
 
     @app.cli.command("init-db")
     def init_db():

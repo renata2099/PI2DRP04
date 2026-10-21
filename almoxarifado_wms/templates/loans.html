@@ -1,4 +1,75 @@
-{% extends 'base.html' %}{% block title %}Empréstimos{% endblock %}{% block content %}
-<header><div><small>GUARDA E LOCAÇÃO</small><h1>Empréstimos e locações</h1><p>Aprovação, prazos, termos e valores em aberto.</p></div></header>
-<details class="panel form-panel" open><summary>Nova solicitação</summary><form method="post" class="grid-form"><label>Equipamento<select name="asset_id">{% for a in assets %}<option value="{{a.id}}">{{a.asset_tag}} · {{a.item.name}}</option>{% endfor %}</select></label><label>Responsável/cliente<select name="party_id">{% for p in parties %}<option value="{{p.id}}">{{p.name}}</option>{% endfor %}</select></label><label>Modalidade<select name="kind"><option value="LOAN">Empréstimo</option><option value="RENTAL">Locação</option></select></label><label>Devolução prevista<input type="datetime-local" name="due_at" required></label><label>Diária R$<input type="number" step="0.01" name="daily_rate"></label><label>Multa/dia R$<input type="number" step="0.01" name="late_fee_daily"></label><label>Observação<input name="notes"></label><button>Enviar para aprovação</button></form></details>
-<section class="panel"><table><thead><tr><th>#</th><th>Equipamento</th><th>Responsável</th><th>Prazo</th><th>Status</th><th>Valor</th><th>Ações</th></tr></thead><tbody>{% for l in loans %}<tr><td>{{l.id}}</td><td><b>{{l.asset.asset_tag}}</b><small>{{l.asset.item.name}}</small></td><td>{{l.party.name}}</td><td>{{l.due_at.strftime('%d/%m/%Y %H:%M')}}</td><td><span class="badge {{'green' if l.status=='RETURNED' else 'amber'}}">{{l.status}}</span></td><td>R$ {{'%.2f'|format(l.total)}}<small>Pago R$ {{'%.2f'|format(l.paid_amount)}}</small></td><td class="actions"><a href="{{url_for('loan_term',loan_id=l.id)}}">Termo</a>{% if l.status=='PENDING' and current_user.role in ['admin','manager'] %}<form method="post" action="{{url_for('loan_action',loan_id=l.id,action='approve')}}"><button>Aprovar</button></form><form method="post" action="{{url_for('loan_action',loan_id=l.id,action='reject')}}"><button class="ghost">Recusar</button></form>{% elif l.status=='ACTIVE' %}<form method="post" action="{{url_for('loan_action',loan_id=l.id,action='return')}}"><input type="hidden" name="return_condition" value="GOOD"><button>Devolver</button></form>{% endif %}{% if l.status in ['ACTIVE','RETURNED'] and l.paid_amount < l.total %}<form method="post" action="{{url_for('loan_action',loan_id=l.id,action='pay')}}"><input type="number" step="0.01" min="0.01" name="amount" placeholder="Pagamento" required><button>Baixar</button></form>{% endif %}</td></tr>{% endfor %}</tbody></table></section>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Empréstimos{% endblock %}
+{% block content %}
+<header><div><small>GUARDA E LOCAÇÃO</small><h1>Empréstimos e locações</h1><p>Aprovação, prazos, responsáveis e termos de entrega.</p></div></header>
+<details class="panel form-panel" open>
+  <summary>Nova solicitação</summary>
+  <form method="post" class="grid-form">
+    <label>Equipamento<select name="asset_id" required>{% for a in assets %}<option value="{{ a.id }}">{{ a.asset_tag }} · {{ a.item.name }}</option>{% endfor %}</select></label>
+    <label>Responsável/cliente<select name="party_id" required>{% for p in parties %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}</select></label>
+    <label>Modalidade<select name="kind"><option value="LOAN">Empréstimo</option><option value="RENTAL">Locação</option></select></label>
+    <label>Devolução prevista<input type="datetime-local" name="due_at" required></label>
+    <label>Diária R$<input type="number" step="0.01" min="0" name="daily_rate" placeholder="Padrão do equipamento"></label>
+    <label>Multa/dia R$<input type="number" step="0.01" min="0" name="late_fee_daily" placeholder="Padrão do equipamento"></label>
+    <label>Observação<input name="notes"></label>
+    <button>Enviar para aprovação</button>
+  </form>
+</details>
+<section class="panel">
+  <table class="loan-table">
+    <thead><tr><th>#</th><th>Equipamento</th><th>Com quem está / Destino</th><th>Datas</th><th>Situação</th><th>Valores</th><th>Ações</th></tr></thead>
+    <tbody>
+    {% for l in loans %}
+      <tr>
+        <td>{{ l.id }}</td>
+        <td><b>{{ l.asset.asset_tag }}</b><small>{{ l.asset.item.name }}</small><small>{{ 'Locação' if l.kind == 'RENTAL' else 'Empréstimo' }}</small></td>
+        <td>
+          <b>{{ l.party.name }}</b>
+          <small>{{ 'Em posse de' if l.status=='ACTIVE' else 'Reservado para' if l.status=='PENDING' else 'Último responsável' if l.status=='RETURNED' else 'Solicitado para' }}</small>
+          {% if l.party.document %}<small>Documento: {{ l.party.document }}</small>{% endif %}
+          {% if l.party.phone %}<small>{{ l.party.phone }}</small>{% endif %}
+        </td>
+        <td>
+          <b>Prazo: {{ l.due_at.strftime('%d/%m/%Y %H:%M') }}</b>
+          <small>Solicitado: {{ l.requested_at.strftime('%d/%m/%Y %H:%M') }}</small>
+          {% if l.start_at %}<small>Retirado: {{ l.start_at.strftime('%d/%m/%Y %H:%M') }}</small>{% endif %}
+          {% if l.returned_at %}<small>Devolvido: {{ l.returned_at.strftime('%d/%m/%Y %H:%M') }}</small>{% endif %}
+        </td>
+        <td>
+          {% set label = {'PENDING':'Aguardando aprovação','ACTIVE':'Em posse do responsável','RETURNED':'Devolvido','REJECTED':'Recusado'} %}
+          <span class="badge {{ 'green' if l.status=='RETURNED' else 'red' if l.status=='REJECTED' else 'amber' }}">{{ label.get(l.status, l.status) }}</span>
+          {% if l.status=='ACTIVE' and l.overdue_days>0 %}<small class="overdue">Atrasado há {{ l.overdue_days }} dia(s)</small>{% endif %}
+        </td>
+        <td>
+          <b>R$ {{ '%.2f'|format(l.total) }}</b>
+          <small>Pago: R$ {{ '%.2f'|format(l.paid_amount) }}</small>
+          <small>Em aberto: R$ {{ '%.2f'|format([l.total - l.paid_amount, 0]|max) }}</small>
+        </td>
+        <td>
+          <div class="loan-actions">
+            <a href="{{ url_for('loan_term', loan_id=l.id) }}" target="_blank" rel="noopener">Termo PDF</a>
+            {% if l.status=='PENDING' and current_user.role in ['admin','manager'] %}
+              <form method="post" action="{{ url_for('loan_action',loan_id=l.id,action='approve') }}"><button>Aprovar</button></form>
+              <form method="post" action="{{ url_for('loan_action',loan_id=l.id,action='reject') }}"><button class="ghost">Recusar</button></form>
+            {% elif l.status=='ACTIVE' %}
+              <form method="post" action="{{ url_for('loan_action',loan_id=l.id,action='return') }}">
+                <label>Estado na devolução
+                  <select name="return_condition"><option value="GOOD">Bom estado</option><option value="DAMAGED">Danificado (bloquear)</option></select>
+                </label>
+                <button>Confirmar devolução</button>
+              </form>
+            {% endif %}
+            {% if l.status in ['ACTIVE','RETURNED'] and l.paid_amount < l.total %}
+              <form class="payment-form" method="post" action="{{ url_for('loan_action',loan_id=l.id,action='pay') }}">
+                <label>Valor do pagamento (R$)<input type="number" step="0.01" min="0.01" name="amount" placeholder="0,00" required></label>
+                <button>Registrar pagamento</button>
+              </form>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+    {% else %}<tr><td colspan="7">Nenhuma solicitação registrada.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

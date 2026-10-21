@@ -86,7 +86,7 @@ Login inicial: `admin@empresa.local` / `Admin@123`. Troque essa senha antes de l
 2. Em **Administração**, cadastre filiais, depósitos e usuários.
 3. Em **Itens**, cadastre materiais ou modelos de equipamentos.
 4. Em **Equipamentos**, crie cada unidade física e adicione suas fotos.
-5. Em **Pessoas e clientes**, cadastre quem receberá os bens.
+5. Em **Clientes **, cadastre quem receberá os bens.
 
 ### Almoxarifado
 

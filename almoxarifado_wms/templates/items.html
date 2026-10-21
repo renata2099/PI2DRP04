@@ -1,2 +1,67 @@
-{% extends 'base.html' %}{% block title %}Itens{% endblock %}{% block content %}<header><div><small>CADASTRO MESTRE</small><h1>Itens</h1><p>Materiais de consumo e modelos de equipamentos.</p></div></header><details class="panel form-panel"><summary>Novo item</summary><form method="post" class="grid-form"><label>SKU<input name="sku" required></label><label>Nome<input name="name" required></label><label>Categoria<input name="category"></label><label>Tipo<select name="item_type"><option value="STOCK">Material de estoque</option><option value="EQUIPMENT">Equipamento</option></select></label><label>Unidade<input name="unit" value="UN"></label><label>Estoque mínimo<input type="number" step="0.001" name="minimum_stock" value="0"></label><button>Cadastrar item</button></form></details><section class="panel"><table><thead><tr><th>SKU</th><th>Item</th><th>Categoria</th><th>Tipo</th><th>Un.</th><th>Mínimo</th></tr></thead><tbody>{% for i in items %}<tr><td><code>{{i.sku}}</code></td><td><b>{{i.name}}</b></td><td>{{i.category or '-'}}</td><td><span class="badge">{{'Estoque' if i.item_type=='STOCK' else 'Equipamento'}}</span></td><td>{{i.unit}}</td><td>{{i.minimum_stock}}</td></tr>{% endfor %}</tbody></table></section>{% endblock %}
-
+{% extends 'base.html' %}
+{% block title %}Itens{% endblock %}
+{% block content %}
+<header><div><small>CADASTRO MESTRE</small><h1>Itens</h1><p>Materiais de consumo, modelos de equipamentos e sua condição.</p></div></header>
+<details class="panel form-panel">
+  <summary>＋ Cadastrar novo item</summary>
+  <form method="post" class="grid-form" id="item-form">
+    <label>SKU<input name="sku" required maxlength="50"></label>
+    <label>Nome<input name="name" required maxlength="160"></label>
+    <label>Categoria
+      <select name="category" id="item-category">
+        <option value="" selected>Selecione uma categoria (opcional)</option>
+        {% for category in categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}
+        <option value="__new__">＋ Cadastrar nova categoria</option>
+      </select>
+    </label>
+    <label>Tipo<select name="item_type"><option value="STOCK">Material de estoque</option><option value="EQUIPMENT">Modelo de equipamento</option></select></label>
+    <label id="new-category-field" class="category-new" hidden>Nome da nova categoria
+      <input name="new_category" id="new-category" maxlength="80" placeholder="Ex.: Ferramentas" autocomplete="off">
+    </label>
+    <label>Condição inicial<select name="condition" required><option value="NEW">Novo</option><option value="USED">Usado</option><option value="DISPOSAL">Descarte</option></select></label>
+    <label>Unidade<input name="unit" value="UN" maxlength="10"></label>
+    <label>Estoque mínimo<input type="number" step="0.001" min="0" name="minimum_stock" value="0"></label>
+    <button>Cadastrar item</button>
+  </form>
+  <p class="field-hint">Para equipamentos individuais, a condição real é registrada na ficha de cada patrimônio. Categorias novas ficam disponíveis nos próximos cadastros.</p>
+</details>
+<section class="panel search-panel">
+  <div class="search-heading"><div><h2>Consultar itens</h2><p>{{ items|length }} resultado(s) de {{ total }} cadastrado(s)</p></div></div>
+  <form method="get" class="filter-bar" role="search">
+    <label class="filter-search">Pesquisar por nome, SKU ou categoria<input type="search" name="q" value="{{ search }}" placeholder="Ex.: teclado, PER001 ou informática" autocomplete="off"></label>
+    <label>Tipo<select name="type"><option value="">Todos</option><option value="STOCK" {% if selected_type=='STOCK' %}selected{% endif %}>Estoque</option><option value="EQUIPMENT" {% if selected_type=='EQUIPMENT' %}selected{% endif %}>Equipamento</option></select></label>
+    <label>Condição<select name="condition"><option value="">Todas</option><option value="NEW" {% if selected_condition=='NEW' %}selected{% endif %}>Novo</option><option value="USED" {% if selected_condition=='USED' %}selected{% endif %}>Usado</option><option value="DISPOSAL" {% if selected_condition=='DISPOSAL' %}selected{% endif %}>Descarte</option><option value="UNSPECIFIED" {% if selected_condition=='UNSPECIFIED' %}selected{% endif %}>A classificar (legado)</option></select></label>
+    <button type="submit">Pesquisar</button>
+    <a class="btn-soft" href="{{ url_for('items') }}">Limpar</a>
+    <button class="btn-soft" type="submit" name="export" value="csv">↓ CSV</button>
+  </form>
+  <div class="table-scroll">
+    <table><thead><tr><th>SKU</th><th>Item</th><th>Categoria</th><th>Tipo</th><th>Condição</th><th>Un.</th><th>Mínimo</th><th>Atualizar condição</th></tr></thead>
+      <tbody>{% for i in items %}<tr>
+        <td><code>{{ i.sku }}</code></td><td><b>{{ i.name }}</b></td><td>{{ i.category or '-' }}</td>
+        <td><span class="badge">{{ 'Estoque' if i.item_type=='STOCK' else 'Equipamento' }}</span></td>
+        <td><span class="badge {{ 'green' if i.condition=='NEW' else 'amber' if i.condition=='USED' else 'red' if i.condition=='DISPOSAL' else '' }}">{{ condition_labels.get(i.condition, 'A classificar') }}</span></td>
+        <td>{{ i.unit }}</td><td>{{ i.minimum_stock }}</td>
+        <td><form class="inline-condition" method="post" action="{{ url_for('item_condition', item_id=i.id) }}">
+          <select name="condition" required aria-label="Alterar condição de {{ i.name }}">{% if i.condition not in ['NEW','USED','DISPOSAL'] %}<option value="" disabled selected>Classificar...</option>{% endif %}<option value="NEW" {% if i.condition=='NEW' %}selected{% endif %}>Novo</option><option value="USED" {% if i.condition=='USED' %}selected{% endif %}>Usado</option><option value="DISPOSAL" {% if i.condition=='DISPOSAL' %}selected{% endif %}>Descarte</option></select>
+          <button type="submit" class="btn-sm">Salvar</button></form></td>
+      </tr>{% else %}<tr><td colspan="8" class="empty">Nenhum item encontrado para estes filtros.</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</section>
+<script>
+(function () {
+  const select = document.getElementById('item-category');
+  const field = document.getElementById('new-category-field');
+  const input = document.getElementById('new-category');
+  function sync() {
+    const isNew = select.value === '__new__';
+    field.hidden = !isNew;
+    input.required = isNew;
+    if (isNew) input.focus(); else input.value = '';
+  }
+  select.addEventListener('change', sync);
+  sync();
+}());
+</script>
+{% endblock %}

@@ -1,2 +1,31 @@
-{% extends 'base.html' %}{% block title %}{{asset.asset_tag}}{% endblock %}{% block content %}<header><div><small>EQUIPAMENTO {{asset.asset_tag}}</small><h1>{{asset.item.name}}</h1><p>{{asset.branch.name}} · {{asset.warehouse.name}}</p></div><img class="qr" src="{{url_for('asset_qr',asset_id=asset.id)}}"></header><section class="metrics"><article><span>Status</span><strong class="text">{{asset.status}}</strong></article><article><span>Condição</span><strong class="text">{{asset.condition}}</strong></article><article><span>Diária</span><strong class="text">R$ {{'%.2f'|format(asset.daily_rate)}}</strong></article><article><span>Multa/dia</span><strong class="text">R$ {{'%.2f'|format(asset.late_fee_daily)}}</strong></article></section><section class="panel"><h2>Fotos do equipamento</h2><div class="gallery">{% for p in asset.photos %}<figure><img src="{{url_for('uploads',filename=p.filename)}}"><figcaption>{{p.caption or ''}}</figcaption></figure>{% endfor %}</div><form method="post" enctype="multipart/form-data" action="{{url_for('asset_photo',asset_id=asset.id)}}" class="inline-form"><input type="file" name="photo" accept="image/png,image/jpeg,image/webp" required><input name="caption" placeholder="Legenda"><button>Adicionar foto</button></form></section>{% endblock %}
-
+{% extends 'base.html' %}
+{% block title %}{{ asset.asset_tag }}{% endblock %}
+{% block content %}
+<header><div><small>EQUIPAMENTO {{ asset.asset_tag }}</small><h1>{{ asset.item.name }}</h1><p>{{ asset.branch.name }} · {{ asset.warehouse.name }}</p><a class="back-link" href="{{ url_for('assets') }}">← Voltar para equipamentos</a></div><img class="qr" alt="QR Code do equipamento" src="{{ url_for('asset_qr',asset_id=asset.id) }}"></header>
+{% if current_loan %}
+<section class="panel custody-panel">
+  <h2>{{ 'Equipamento em posse de' if current_loan.status=='ACTIVE' else 'Equipamento reservado para' }}</h2>
+  <strong>{{ current_loan.party.name }}</strong>
+  {% if current_loan.party.document %}<p>Documento: {{ current_loan.party.document }}</p>{% endif %}
+  <p>Prazo de devolução: {{ current_loan.due_at.strftime('%d/%m/%Y %H:%M') }}</p>
+  <a href="{{ url_for('loan_term',loan_id=current_loan.id) }}" target="_blank" rel="noopener">Abrir termo de responsabilidade</a>
+</section>
+{% endif %}
+<section class="metrics"><article><span>Disponibilidade</span><strong class="text">{{ asset_status_labels.get(asset.status, asset.status) }}</strong></article><article><span>Condição</span><strong class="text">{{ condition_labels.get(asset.condition, 'A classificar') }}</strong></article><article><span>Diária</span><strong class="text">R$ {{ '%.2f'|format(asset.daily_rate) }}</strong></article><article><span>Multa/dia</span><strong class="text">R$ {{ '%.2f'|format(asset.late_fee_daily) }}</strong></article></section>
+<section class="panel">
+  <h2>Condição do equipamento</h2>
+  <p>Classifique o estado de conservação. Descarte retira o patrimônio da lista de equipamentos disponíveis para locação ou empréstimo.</p>
+  <form method="post" action="{{ url_for('asset_condition',asset_id=asset.id) }}" class="condition-form">
+    <label>Condição<select name="condition" required><option value="" disabled {% if asset.condition not in ['NEW','USED','DISPOSAL'] %}selected{% endif %}>Selecione a condição</option><option value="NEW" {% if asset.condition=='NEW' %}selected{% endif %}>Novo</option><option value="USED" {% if asset.condition=='USED' %}selected{% endif %}>Usado</option><option value="DISPOSAL" {% if asset.condition=='DISPOSAL' %}selected{% endif %}>Descarte</option></select></label>
+    <button type="submit">Salvar condição</button>
+  </form>
+  {% if asset.status in ['LOANED','RESERVED'] %}<p class="field-hint">Não é possível marcar Descarte enquanto houver empréstimo ou reserva pendente.</p>{% endif %}
+  {% if asset.status=='MAINTENANCE' %}
+  <div class="maintenance-action">
+    <p>Equipamento bloqueado para manutenção. Quando o reparo e a conferência terminarem, ele poderá voltar à disponibilidade.</p>
+    <form method="post" action="{{ url_for('asset_release',asset_id=asset.id) }}"><button type="submit">✓ Liberar após manutenção</button></form>
+  </div>
+  {% endif %}
+</section>
+<section class="panel"><h2>Fotos do equipamento</h2><div class="gallery">{% for p in asset.photos %}<figure><img src="{{ url_for('uploads',filename=p.filename) }}" alt="Foto de {{ asset.item.name }}"><figcaption>{{ p.caption or '' }}</figcaption></figure>{% endfor %}</div><form method="post" enctype="multipart/form-data" action="{{ url_for('asset_photo',asset_id=asset.id) }}" class="inline-form"><input type="file" name="photo" accept="image/png,image/jpeg,image/webp" required><input name="caption" placeholder="Legenda"><button>Adicionar foto</button></form></section>
+{% endblock %}

@@ -56,6 +56,8 @@ class Item(db.Model):
     sku = db.Column(db.String(50), unique=True, nullable=False)
     name = db.Column(db.String(160), nullable=False)
     category = db.Column(db.String(80))
+    # Estado de conservação: separado do saldo de estoque e da disponibilidade do patrimônio.
+    condition = db.Column(db.String(20), default="UNSPECIFIED", nullable=False)
     item_type = db.Column(db.String(20), nullable=False)  # STOCK/EQUIPMENT
     unit = db.Column(db.String(10), default="UN", nullable=False)
     minimum_stock = db.Column(db.Numeric(14, 3), default=0, nullable=False)
