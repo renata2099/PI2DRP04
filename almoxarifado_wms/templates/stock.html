@@ -3,6 +3,7 @@
 {% block content %}
 <header><div><small>ALMOXARIFADO</small><h1>Movimentação de estoque</h1><p>Entradas, saídas e saldos rastreados por depósito.</p></div></header>
 <section class="info-strip"><div><span>Posições de estoque</span><strong>{{ total_balances }}</strong></div><div><span>Precisam de reposição</span><strong class="{{ 'alert-text' if low_count else '' }}">{{ low_count }}</strong></div><div><span>Condição do item</span><small>Novo / Usado / Descarte</small></div></section>
+{% if current_user.can('admin','manager','operator') %}
 <details class="panel form-panel"><summary>＋ Registrar movimentação</summary><form method="post" class="grid-form">
   <label>Item<select name="item_id" required>{% for i in items %}<option value="{{i.id}}">{{i.sku}} · {{i.name}}</option>{% endfor %}</select></label>
   <label>Depósito<select name="warehouse_id" required>{% for w in warehouses %}<option value="{{w.id}}">{{w.branch.code}} · {{w.name}}</option>{% endfor %}</select></label>
@@ -10,6 +11,7 @@
   <label>Quantidade<input type="number" min="0.001" step="0.001" name="quantity" required></label>
   <label>Documento/referência<input name="reference"></label><label>Observação<input name="notes"></label><button>Confirmar movimento</button>
 </form></details>
+{% endif %}
 <section class="panel search-panel">
   <div class="search-heading"><div><h2>Consulta de saldos</h2><p>{{ balances|length }} posição(ões) encontrada(s). O indicador de reposição é separado da condição do item.</p></div></div>
   <form method="get" class="filter-bar" role="search">
@@ -18,7 +20,7 @@
     <button type="submit">Pesquisar</button><a class="btn-soft" href="{{ url_for('stock') }}">Limpar</a>
     <button class="btn-soft" type="submit" name="export" value="csv">↓ CSV</button>
   </form>
-  <div class="table-scroll"><table><thead><tr><th>SKU / Item</th><th>Categoria</th><th>Depósito</th><th>Condição</th><th>Saldo</th><th>Reposição</th></tr></thead>
+  <div class="table-scroll" role="region" tabindex="0" aria-label="Saldos do estoque"><table><thead><tr><th>SKU / Item</th><th>Categoria</th><th>Depósito</th><th>Condição</th><th>Saldo</th><th>Reposição</th></tr></thead>
     <tbody>{% for b in balances %}<tr>
       <td><code>{{b.item.sku}}</code><br><b>{{b.item.name}}</b></td><td>{{ b.item.category or '-' }}</td><td>{{b.warehouse.name}}</td>
       <td><span class="badge {{ 'green' if b.item.condition=='NEW' else 'amber' if b.item.condition=='USED' else 'red' if b.item.condition=='DISPOSAL' else '' }}">{{ condition_labels.get(b.item.condition, 'A classificar') }}</span></td>
@@ -27,5 +29,5 @@
     </tr>{% else %}<tr><td colspan="6" class="empty">Nenhum saldo encontrado para estes filtros.</td></tr>{% endfor %}</tbody>
   </table></div>
 </section>
-<section class="panel"><h2>Últimas movimentações</h2><div class="table-scroll"><table><thead><tr><th>Data</th><th>Item</th><th>Tipo</th><th>Qtd.</th><th>Usuário</th><th>Referência</th></tr></thead><tbody>{% for m in movements %}<tr><td>{{m.created_at.strftime('%d/%m %H:%M')}}</td><td>{{m.item.name}}</td><td>{{'Entrada' if m.movement_type=='IN' else 'Saída'}}</td><td>{{m.quantity}}</td><td>{{m.user.name}}</td><td>{{m.reference or '-'}}</td></tr>{% else %}<tr><td colspan="6" class="empty">Nenhuma movimentação registrada.</td></tr>{% endfor %}</tbody></table></div></section>
+<section class="panel"><h2>Últimas movimentações</h2><div class="table-scroll" role="region" tabindex="0" aria-label="Últimas movimentações de estoque"><table><thead><tr><th>Data</th><th>Item</th><th>Tipo</th><th>Qtd.</th><th>Usuário</th><th>Referência</th></tr></thead><tbody>{% for m in movements %}<tr><td>{{m.created_at.strftime('%d/%m %H:%M')}}</td><td>{{m.item.name}}</td><td>{{'Entrada' if m.movement_type=='IN' else 'Saída'}}</td><td>{{m.quantity}}</td><td>{{m.user.name}}</td><td>{{m.reference or '-'}}</td></tr>{% else %}<tr><td colspan="6" class="empty">Nenhuma movimentação registrada.</td></tr>{% endfor %}</tbody></table></div></section>
 {% endblock %}

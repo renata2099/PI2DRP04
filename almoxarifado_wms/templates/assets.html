@@ -2,6 +2,7 @@
 {% block title %}Equipamentos{% endblock %}
 {% block content %}
 <header><div><small>PATRIMÔNIO</small><h1>Equipamentos</h1><p>Pesquise por patrimônio, modelo, série, filial ou depósito.</p></div></header>
+{% if current_user.can('admin','manager','operator') %}
 <details class="panel form-panel"><summary>＋ Cadastrar novo equipamento</summary>
   <form method="post" class="grid-form">
     <label>Modelo<select name="item_id" required>{% for i in items %}<option value="{{i.id}}">{{i.sku}} · {{i.name}}</option>{% endfor %}</select></label>
@@ -15,6 +16,7 @@
     <label>Observação<input name="notes"></label><button>Cadastrar equipamento</button>
   </form>
 </details>
+{% endif %}
 <section class="panel search-panel">
   <div class="search-heading"><div><h2>Buscar no patrimônio</h2><p>{{ assets|length }} resultado(s) de {{ total_assets }} equipamento(s)</p></div></div>
   <form method="get" class="filter-bar" role="search">

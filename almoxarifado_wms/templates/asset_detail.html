@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}{{ asset.asset_tag }}{% endblock %}
 {% block content %}
-<header><div><small>EQUIPAMENTO {{ asset.asset_tag }}</small><h1>{{ asset.item.name }}</h1><p>{{ asset.branch.name }} · {{ asset.warehouse.name }}</p><a class="back-link" href="{{ url_for('assets') }}">← Voltar para equipamentos</a></div><img class="qr" alt="QR Code do equipamento" src="{{ url_for('asset_qr',asset_id=asset.id) }}"></header>
+<header><div><small>EQUIPAMENTO {{ asset.asset_tag }}</small><h1>{{ asset.item.name }}</h1><p>{{ asset.branch.name }} · {{ asset.warehouse.name }}</p><a class="back-link" href="{{ url_for('assets') }}">← Voltar para equipamentos</a></div><img class="qr" alt="QR Code do equipamento {{ asset.asset_tag }}" src="{{ url_for('asset_qr',asset_id=asset.id) }}"></header>
 {% if current_loan %}
 <section class="panel custody-panel">
   <h2>{{ 'Equipamento em posse de' if current_loan.status=='ACTIVE' else 'Equipamento reservado para' }}</h2>
@@ -15,17 +15,29 @@
 <section class="panel">
   <h2>Condição do equipamento</h2>
   <p>Classifique o estado de conservação. Descarte retira o patrimônio da lista de equipamentos disponíveis para locação ou empréstimo.</p>
+  {% if current_user.can('admin','manager','operator') %}
   <form method="post" action="{{ url_for('asset_condition',asset_id=asset.id) }}" class="condition-form">
     <label>Condição<select name="condition" required><option value="" disabled {% if asset.condition not in ['NEW','USED','DISPOSAL'] %}selected{% endif %}>Selecione a condição</option><option value="NEW" {% if asset.condition=='NEW' %}selected{% endif %}>Novo</option><option value="USED" {% if asset.condition=='USED' %}selected{% endif %}>Usado</option><option value="DISPOSAL" {% if asset.condition=='DISPOSAL' %}selected{% endif %}>Descarte</option></select></label>
     <button type="submit">Salvar condição</button>
   </form>
+  {% endif %}
   {% if asset.status in ['LOANED','RESERVED'] %}<p class="field-hint">Não é possível marcar Descarte enquanto houver empréstimo ou reserva pendente.</p>{% endif %}
-  {% if asset.status=='MAINTENANCE' %}
+  {% if asset.status=='MAINTENANCE' and current_user.can('admin','manager','operator') %}
   <div class="maintenance-action">
     <p>Equipamento bloqueado para manutenção. Quando o reparo e a conferência terminarem, ele poderá voltar à disponibilidade.</p>
     <form method="post" action="{{ url_for('asset_release',asset_id=asset.id) }}"><button type="submit">✓ Liberar após manutenção</button></form>
   </div>
   {% endif %}
 </section>
-<section class="panel"><h2>Fotos do equipamento</h2><div class="gallery">{% for p in asset.photos %}<figure><img src="{{ url_for('uploads',filename=p.filename) }}" alt="Foto de {{ asset.item.name }}"><figcaption>{{ p.caption or '' }}</figcaption></figure>{% endfor %}</div><form method="post" enctype="multipart/form-data" action="{{ url_for('asset_photo',asset_id=asset.id) }}" class="inline-form"><input type="file" name="photo" accept="image/png,image/jpeg,image/webp" required><input name="caption" placeholder="Legenda"><button>Adicionar foto</button></form></section>
+<section class="panel">
+  <h2>Fotos do equipamento</h2>
+  <div class="gallery">{% for p in asset.photos %}<figure><img src="{{ url_for('uploads',filename=p.filename) }}" alt="{{ p.caption or ('Foto do equipamento ' ~ asset.asset_tag) }}"><figcaption>{{ p.caption or '' }}</figcaption></figure>{% endfor %}</div>
+  {% if current_user.can('admin','manager','operator') %}
+  <form method="post" enctype="multipart/form-data" action="{{ url_for('asset_photo',asset_id=asset.id) }}" class="inline-form">
+    <label for="photo-upload">Fotografia do equipamento<input id="photo-upload" type="file" name="photo" accept="image/png,image/jpeg,image/webp" required></label>
+    <label for="photo-caption">Legenda da fotografia<input id="photo-caption" name="caption" maxlength="160" placeholder="Descreva a imagem"></label>
+    <button type="submit">Adicionar foto</button>
+  </form>
+  {% endif %}
+</section>
 {% endblock %}

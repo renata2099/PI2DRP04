@@ -2,6 +2,7 @@
 {% block title %}Empréstimos{% endblock %}
 {% block content %}
 <header><div><small>GUARDA E LOCAÇÃO</small><h1>Empréstimos e locações</h1><p>Aprovação, prazos, responsáveis e termos de entrega.</p></div></header>
+{% if current_user.can('admin','manager','operator') %}
 <details class="panel form-panel" open>
   <summary>Nova solicitação</summary>
   <form method="post" class="grid-form">
@@ -15,7 +16,8 @@
     <button>Enviar para aprovação</button>
   </form>
 </details>
-<section class="panel">
+{% endif %}
+<section class="panel"><div class="table-scroll" role="region" tabindex="0" aria-label="Lista de empréstimos e locações">
   <table class="loan-table">
     <thead><tr><th>#</th><th>Equipamento</th><th>Com quem está / Destino</th><th>Datas</th><th>Situação</th><th>Valores</th><th>Ações</th></tr></thead>
     <tbody>
@@ -49,20 +51,20 @@
           <div class="loan-actions">
             <a href="{{ url_for('loan_term', loan_id=l.id) }}" target="_blank" rel="noopener">Termo PDF</a>
             {% if l.status=='PENDING' and current_user.role in ['admin','manager'] %}
-              <form method="post" action="{{ url_for('loan_action',loan_id=l.id,action='approve') }}"><button>Aprovar</button></form>
-              <form method="post" action="{{ url_for('loan_action',loan_id=l.id,action='reject') }}"><button class="ghost">Recusar</button></form>
-            {% elif l.status=='ACTIVE' %}
+              <form method="post" action="{{ url_for('loan_action',loan_id=l.id,action='approve') }}"><button aria-label="Aprovar solicitação {{ l.id }}">Aprovar</button></form>
+              <form method="post" action="{{ url_for('loan_action',loan_id=l.id,action='reject') }}"><button class="ghost" aria-label="Recusar solicitação {{ l.id }}">Recusar</button></form>
+            {% elif l.status=='ACTIVE' and current_user.can('admin','manager','operator') %}
               <form method="post" action="{{ url_for('loan_action',loan_id=l.id,action='return') }}">
                 <label>Estado na devolução
                   <select name="return_condition"><option value="GOOD">Bom estado</option><option value="DAMAGED">Danificado (bloquear)</option></select>
                 </label>
-                <button>Confirmar devolução</button>
+                <button aria-label="Confirmar devolução da solicitação {{ l.id }}">Confirmar devolução</button>
               </form>
             {% endif %}
-            {% if l.status in ['ACTIVE','RETURNED'] and l.paid_amount < l.total %}
+            {% if l.status in ['ACTIVE','RETURNED'] and l.paid_amount < l.total and current_user.can('admin','manager') %}
               <form class="payment-form" method="post" action="{{ url_for('loan_action',loan_id=l.id,action='pay') }}">
                 <label>Valor do pagamento (R$)<input type="number" step="0.01" min="0.01" name="amount" placeholder="0,00" required></label>
-                <button>Registrar pagamento</button>
+                <button aria-label="Registrar pagamento da solicitação {{ l.id }}">Registrar pagamento</button>
               </form>
             {% endif %}
           </div>
@@ -70,6 +72,6 @@
       </tr>
     {% else %}<tr><td colspan="7">Nenhuma solicitação registrada.</td></tr>{% endfor %}
     </tbody>
-  </table>
+  </table></div>
 </section>
 {% endblock %}

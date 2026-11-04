@@ -1,7 +1,7 @@
 import io
 import os
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from pathlib import Path
 from uuid import uuid4
@@ -40,6 +40,23 @@ def ensure_item_condition_column(app):
 
 def clean_condition(value):
     return value if value in ITEM_CONDITIONS else None
+
+
+def nonnegative_decimal(value, *, decimals=2, positive=False):
+    """Rejeita NaN, infinito, negativos, excesso de casas e valores fora do campo numérico."""
+    try:
+        amount = Decimal(str(value).strip())
+        if (not amount.is_finite() or amount < 0 or (positive and amount == 0)
+                or amount.as_tuple().exponent < -decimals
+                or amount >= Decimal("1000000000")):
+            raise ValueError
+    except (InvalidOperation, ValueError, TypeError):
+        abort(400, description="Informe uma quantidade ou valor válido e não negativo.")
+    return amount
+
+
+def allowed_branch(branch_id):
+    return current_user.role == "admin" or current_user.branch_id is None or branch_id == current_user.branch_id
 
 
 def csv_text(value):
@@ -81,6 +98,15 @@ def create_app(test_config=None):
             return wrapped
         return deco
 
+    def scoped_asset(asset_id):
+        return branch_scope(Asset.query, Asset).filter(Asset.id == asset_id).first_or_404()
+
+    def scoped_loan(loan_id):
+        loan = Loan.query.get_or_404(loan_id)
+        if not allowed_branch(loan.asset.branch_id):
+            abort(404)
+        return loan
+
     def branch_scope(query, model):
         if current_user.role != "admin" and current_user.branch_id and hasattr(model, "branch_id"):
             return query.filter(model.branch_id == current_user.branch_id)
@@ -107,9 +133,14 @@ def create_app(test_config=None):
     @login_required
     def dashboard():
         assets = branch_scope(Asset.query, Asset).all()
-        active_loans = Loan.query.filter(Loan.status.in_(["APPROVED", "ACTIVE"])).all()
-        low = StockBalance.query.join(Item).filter(StockBalance.quantity <= Item.minimum_stock).all()
-        pending = Loan.query.filter_by(status="PENDING").count()
+        loan_query = Loan.query.join(Asset)
+        low_query = StockBalance.query.join(Item).join(Warehouse)
+        if current_user.role != "admin" and current_user.branch_id:
+            loan_query = loan_query.filter(Asset.branch_id == current_user.branch_id)
+            low_query = low_query.filter(Warehouse.branch_id == current_user.branch_id)
+        active_loans = loan_query.filter(Loan.status == "ACTIVE").all()
+        low = low_query.filter(StockBalance.quantity <= Item.minimum_stock).all()
+        pending = loan_query.filter(Loan.status == "PENDING").count()
         return render_template("dashboard.html", assets=assets, active_loans=active_loans, low=low, pending=pending)
 
     @app.route("/items", methods=["GET", "POST"])
@@ -131,9 +162,12 @@ def create_app(test_config=None):
             if not condition:
                 flash("Selecione uma condição válida.", "danger")
                 return redirect(url_for("items"))
+            item_type = request.form.get("item_type")
+            if item_type not in {"STOCK", "EQUIPMENT"}: abort(400)
+            minimum = nonnegative_decimal(request.form.get("minimum_stock") or "0", decimals=3)
             db.session.add(Item(sku=request.form["sku"].strip(), name=request.form["name"].strip(), category=category,
-                                condition=condition, item_type=request.form["item_type"], unit=request.form.get("unit", "UN"),
-                                minimum_stock=Decimal(request.form.get("minimum_stock") or "0")))
+                                condition=condition, item_type=item_type, unit=request.form.get("unit", "UN"),
+                                minimum_stock=minimum))
             db.session.commit(); flash("Item cadastrado.", "success"); return redirect(url_for("items"))
         all_items = Item.query.order_by(Item.name).all()
         categories = sorted({i.category.strip() for i in all_items if i.category and i.category.strip()}, key=str.casefold)
@@ -172,20 +206,34 @@ def create_app(test_config=None):
     def stock():
         if request.method == "POST":
             if not current_user.can("admin", "manager", "operator"): abort(403)
-            item_id, wh_id = int(request.form["item_id"]), int(request.form["warehouse_id"])
-            qty = Decimal(request.form["quantity"]); kind = request.form["movement_type"]
+            item_id = request.form.get("item_id", type=int)
+            wh_id = request.form.get("warehouse_id", type=int)
+            kind = request.form.get("movement_type")
+            if item_id is None or wh_id is None or kind not in {"IN", "OUT"}: abort(400)
+            qty = nonnegative_decimal(request.form.get("quantity"), decimals=3, positive=True)
+            item = Item.query.filter_by(id=item_id, active=True, item_type="STOCK").first_or_404()
+            warehouse = Warehouse.query.filter_by(id=wh_id, active=True).first_or_404()
+            if not allowed_branch(warehouse.branch_id): abort(403)
             signed = qty if kind == "IN" else -qty
-            balance = StockBalance.query.filter_by(item_id=item_id, warehouse_id=wh_id).with_for_update().first()
-            if not balance: balance = StockBalance(item_id=item_id, warehouse_id=wh_id, quantity=0); db.session.add(balance)
+            balance = StockBalance.query.filter_by(item_id=item.id, warehouse_id=warehouse.id).with_for_update().first()
+            if not balance:
+                balance = StockBalance(item_id=item.id, warehouse_id=warehouse.id, quantity=Decimal("0"))
+                db.session.add(balance)
             if Decimal(balance.quantity or 0) + signed < 0:
-                flash("Saldo insuficiente para a saída.", "danger"); return redirect(url_for("stock"))
+                db.session.rollback()
+                flash("Saldo insuficiente para a saída.", "danger")
+                return redirect(url_for("stock"))
             balance.quantity = Decimal(balance.quantity or 0) + signed
-            db.session.add(StockMovement(item_id=item_id, warehouse_id=wh_id, movement_type=kind, quantity=qty, reference=request.form.get("reference"), notes=request.form.get("notes"), user_id=current_user.id))
+            db.session.add(StockMovement(item_id=item.id, warehouse_id=warehouse.id,
+                                         movement_type=kind, quantity=qty, reference=request.form.get("reference"),
+                                         notes=request.form.get("notes"), user_id=current_user.id))
             db.session.commit(); flash("Movimentação registrada.", "success"); return redirect(url_for("stock"))
         warehouses = Warehouse.query.order_by(Warehouse.name).all()
         search = request.args.get("q", "").strip()[:120]
         condition = request.args.get("condition", "")
         balance_query = StockBalance.query.join(Item).join(Warehouse)
+        if current_user.role != "admin" and current_user.branch_id:
+            balance_query = balance_query.filter(Warehouse.branch_id == current_user.branch_id)
         if search:
             phrase = f"%{search}%"
             balance_query = balance_query.filter(or_(Item.sku.ilike(phrase), Item.name.ilike(phrase),
@@ -198,12 +246,20 @@ def create_app(test_config=None):
                                 [(b.item.sku, b.item.name, b.item.category or "", CONDITION_LABELS.get(b.item.condition, "A classificar"),
                                   b.warehouse.name, b.quantity, b.item.unit, b.item.minimum_stock,
                                   "Repor" if b.quantity <= b.item.minimum_stock else "Em dia") for b in balances])
-        total_balances = StockBalance.query.count()
-        low_count = StockBalance.query.join(Item).filter(StockBalance.quantity <= Item.minimum_stock).count()
-        return render_template("stock.html", balances=balances, movements=StockMovement.query.order_by(StockMovement.created_at.desc()).limit(30),
+        total_balances = StockBalance.query.join(Warehouse)
+        low_query = StockBalance.query.join(Item).join(Warehouse).filter(StockBalance.quantity <= Item.minimum_stock)
+        movements = StockMovement.query.join(Warehouse)
+        if current_user.role != "admin" and current_user.branch_id:
+            total_balances = total_balances.filter(Warehouse.branch_id == current_user.branch_id)
+            low_query = low_query.filter(Warehouse.branch_id == current_user.branch_id)
+            movements = movements.filter(Warehouse.branch_id == current_user.branch_id)
+            warehouses = [w for w in warehouses if w.branch_id == current_user.branch_id]
+        total_count = total_balances.count()
+        low_count = low_query.count()
+        return render_template("stock.html", balances=balances, movements=movements.order_by(StockMovement.created_at.desc()).limit(30).all(),
                                items=Item.query.filter_by(item_type="STOCK", active=True).order_by(Item.name).all(),
                                warehouses=warehouses, search=search, selected_condition=condition,
-                               total_balances=total_balances, low_count=low_count)
+                               total_balances=total_count, low_count=low_count)
 
     @app.route("/assets", methods=["GET", "POST"])
     @login_required
@@ -214,7 +270,17 @@ def create_app(test_config=None):
             if not condition:
                 flash("Selecione uma condição válida.", "danger")
                 return redirect(url_for("assets"))
-            asset = Asset(item_id=int(request.form["item_id"]), branch_id=int(request.form["branch_id"]), warehouse_id=int(request.form["warehouse_id"]), asset_tag=request.form["asset_tag"].strip(), serial_number=request.form.get("serial_number"), daily_rate=Decimal(request.form.get("daily_rate") or "0"), late_fee_daily=Decimal(request.form.get("late_fee_daily") or "0"), notes=request.form.get("notes"), condition=condition, status="DISCARDED" if condition == "DISPOSAL" else "AVAILABLE")
+            item = Item.query.filter_by(id=request.form.get("item_id", type=int), item_type="EQUIPMENT", active=True).first_or_404()
+            branch = Branch.query.filter_by(id=request.form.get("branch_id", type=int), active=True).first_or_404()
+            warehouse = Warehouse.query.filter_by(id=request.form.get("warehouse_id", type=int), active=True).first_or_404()
+            if warehouse.branch_id != branch.id: abort(400)
+            if not allowed_branch(branch.id): abort(403)
+            asset = Asset(item_id=item.id, branch_id=branch.id, warehouse_id=warehouse.id,
+                          asset_tag=request.form["asset_tag"].strip(), serial_number=request.form.get("serial_number"),
+                          daily_rate=nonnegative_decimal(request.form.get("daily_rate") or "0"),
+                          late_fee_daily=nonnegative_decimal(request.form.get("late_fee_daily") or "0"),
+                          notes=request.form.get("notes"), condition=condition,
+                          status="DISCARDED" if condition == "DISPOSAL" else "AVAILABLE")
             db.session.add(asset); db.session.commit(); flash("Equipamento cadastrado.", "success"); return redirect(url_for("asset_detail", asset_id=asset.id))
         search = request.args.get("q", "").strip()[:120]
         status = request.args.get("status", "")
@@ -245,7 +311,8 @@ def create_app(test_config=None):
                                   holder_by_asset[a.id].party.name if a.id in holder_by_asset else "") for a in listed_assets])
         return render_template("assets.html", assets=listed_assets, holder_by_asset=holder_by_asset,
                                items=Item.query.filter_by(item_type="EQUIPMENT", active=True).order_by(Item.name).all(),
-                               branches=Branch.query.filter_by(active=True).all(), warehouses=Warehouse.query.filter_by(active=True).all(),
+                               branches=[b for b in Branch.query.filter_by(active=True).all() if allowed_branch(b.id)],
+                               warehouses=[w for w in Warehouse.query.filter_by(active=True).all() if allowed_branch(w.branch_id)],
                                search=search, selected_status=status, selected_condition=condition,
                                total_assets=branch_scope(Asset.query, Asset).count())
 
@@ -295,7 +362,8 @@ def create_app(test_config=None):
     @app.route("/assets/<int:asset_id>/photo", methods=["POST"])
     @login_required
     def asset_photo(asset_id):
-        asset = Asset.query.get_or_404(asset_id); file = request.files.get("photo")
+        if not current_user.can("admin", "manager", "operator"): abort(403)
+        asset = scoped_asset(asset_id); file = request.files.get("photo")
         if not file or "." not in file.filename or file.filename.rsplit(".", 1)[1].lower() not in ALLOWED_IMAGES:
             flash("Envie uma imagem PNG, JPG ou WEBP.", "danger"); return redirect(url_for("asset_detail", asset_id=asset.id))
         ext = file.filename.rsplit(".", 1)[1].lower(); filename = f"{uuid4().hex}.{ext}"
@@ -305,12 +373,15 @@ def create_app(test_config=None):
 
     @app.route("/uploads/<path:filename>")
     @login_required
-    def uploads(filename): return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
+    def uploads(filename):
+        photo = AssetPhoto.query.filter_by(filename=filename).first_or_404()
+        if not allowed_branch(photo.asset.branch_id): abort(404)
+        return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
     @app.route("/assets/<int:asset_id>/qr")
     @login_required
     def asset_qr(asset_id):
-        asset = Asset.query.get_or_404(asset_id)
+        asset = scoped_asset(asset_id)
         image = qrcode.make(url_for("asset_detail", asset_id=asset.id, _external=True))
         buffer = io.BytesIO(); image.save(buffer, "PNG"); buffer.seek(0)
         return send_file(buffer, mimetype="image/png", download_name=f"QR-{asset.asset_tag}.png")
@@ -319,6 +390,8 @@ def create_app(test_config=None):
     @login_required
     def parties():
         if request.method == "POST":
+            if not current_user.can("admin", "manager", "operator"): abort(403)
+            if request.form.get("kind") not in {"EMPLOYEE", "CUSTOMER", "SUPPLIER"}: abort(400)
             db.session.add(Party(kind=request.form["kind"], document=request.form.get("document"), name=request.form["name"], email=request.form.get("email"), phone=request.form.get("phone")))
             db.session.commit(); flash("Pessoa cadastrada.", "success"); return redirect(url_for("parties"))
         return render_template("parties.html", parties=Party.query.order_by(Party.name).all())
@@ -342,19 +415,40 @@ def create_app(test_config=None):
     @login_required
     def loans():
         if request.method == "POST":
-            asset = Asset.query.get_or_404(int(request.form["asset_id"]))
+            if not current_user.can("admin", "manager", "operator"): abort(403)
+            asset = scoped_asset(request.form.get("asset_id", type=int))
+            party = Party.query.filter_by(id=request.form.get("party_id", type=int), active=True).first_or_404()
             if asset.status != "AVAILABLE": flash("Equipamento indisponível.", "danger"); return redirect(url_for("loans"))
-            due = datetime.fromisoformat(request.form["due_at"])
-            loan = Loan(asset_id=asset.id, party_id=int(request.form["party_id"]), kind=request.form["kind"], due_at=due, requested_by_id=current_user.id, daily_rate=Decimal(request.form.get("daily_rate") or asset.daily_rate), late_fee_daily=Decimal(request.form.get("late_fee_daily") or asset.late_fee_daily), notes=request.form.get("notes"))
+            if request.form.get("kind") not in {"LOAN", "RENTAL"}: abort(400)
+            try:
+                due = datetime.fromisoformat(request.form["due_at"])
+            except (ValueError, KeyError):
+                abort(400)
+            if due <= now(): abort(400, description="A devolução prevista precisa ser futura.")
+            rate = nonnegative_decimal(request.form.get("daily_rate") or asset.daily_rate)
+            late = nonnegative_decimal(request.form.get("late_fee_daily") or asset.late_fee_daily)
+            loan = Loan(asset_id=asset.id, party_id=party.id, kind=request.form["kind"], due_at=due,
+                        requested_by_id=current_user.id, daily_rate=rate, late_fee_daily=late,
+                        notes=request.form.get("notes"))
             asset.status = "RESERVED"; db.session.add(loan); db.session.flush(); db.session.add(LoanEvent(loan_id=loan.id, event_type="REQUESTED", details="Solicitação criada", user_id=current_user.id)); db.session.commit()
             flash("Solicitação enviada para aprovação.", "success"); return redirect(url_for("loans"))
-        return render_template("loans.html", loans=Loan.query.order_by(Loan.requested_at.desc()).all(), assets=branch_scope(Asset.query, Asset).filter_by(status="AVAILABLE").all(), parties=Party.query.filter_by(active=True).all())
+        loans_query = Loan.query.join(Asset)
+        if current_user.role != "admin" and current_user.branch_id:
+            loans_query = loans_query.filter(Asset.branch_id == current_user.branch_id)
+        return render_template("loans.html", loans=loans_query.order_by(Loan.requested_at.desc()).all(),
+                               assets=branch_scope(Asset.query, Asset).filter_by(status="AVAILABLE").all(),
+                               parties=Party.query.filter_by(active=True).all())
 
     @app.route("/loans/<int:loan_id>/<action>", methods=["POST"])
     @login_required
     def loan_action(loan_id, action):
-        loan = Loan.query.get_or_404(loan_id)
-        if action in {"approve", "reject"} and not current_user.can("admin", "manager"): abort(403)
+        loan = scoped_loan(loan_id)
+        if action in {"approve", "reject", "pay"}:
+            if not current_user.can("admin", "manager"): abort(403)
+        elif action == "return":
+            if not current_user.can("admin", "manager", "operator"): abort(403)
+        else:
+            abort(400)
         if action == "approve" and loan.status == "PENDING":
             loan.status="ACTIVE"; loan.start_at=now(); loan.approved_at=now(); loan.approved_by_id=current_user.id; loan.asset.status="LOANED"; event="APPROVED"
         elif action == "reject" and loan.status == "PENDING":
@@ -364,14 +458,17 @@ def create_app(test_config=None):
             if loan.return_condition not in {"GOOD", "DAMAGED"}: abort(400)
             loan.asset.condition="USED"; loan.asset.status="AVAILABLE" if loan.return_condition == "GOOD" else "MAINTENANCE"; event="RETURNED"
         elif action == "pay" and loan.status in {"ACTIVE", "RETURNED"}:
-            loan.paid_amount = Decimal(loan.paid_amount or 0) + Decimal(request.form.get("amount") or "0"); event="PAYMENT"
+            amount = nonnegative_decimal(request.form.get("amount"), positive=True)
+            if amount > loan.total - Decimal(loan.paid_amount or 0):
+                abort(400, description="Pagamento acima do saldo em aberto.")
+            loan.paid_amount = Decimal(loan.paid_amount or 0) + amount; event="PAYMENT"
         else: abort(400)
         db.session.add(LoanEvent(loan_id=loan.id, event_type=event, details=request.form.get("details"), user_id=current_user.id)); db.session.commit(); flash("Operação realizada.", "success"); return redirect(url_for("loans"))
 
     @app.route("/loans/<int:loan_id>/term")
     @login_required
     def loan_term(loan_id):
-        loan = Loan.query.get_or_404(loan_id)
+        loan = scoped_loan(loan_id)
         document = generate_loan_term(loan, app.config["COMPANY_NAME"])
         return send_file(document, mimetype="application/pdf", download_name=f"termo-{loan.id}.pdf")
 

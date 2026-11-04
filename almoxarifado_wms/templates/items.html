@@ -2,6 +2,7 @@
 {% block title %}Itens{% endblock %}
 {% block content %}
 <header><div><small>CADASTRO MESTRE</small><h1>Itens</h1><p>Materiais de consumo, modelos de equipamentos e sua condição.</p></div></header>
+{% if current_user.can('admin','manager','operator') %}
 <details class="panel form-panel">
   <summary>＋ Cadastrar novo item</summary>
   <form method="post" class="grid-form" id="item-form">
@@ -25,6 +26,7 @@
   </form>
   <p class="field-hint">Para equipamentos individuais, a condição real é registrada na ficha de cada patrimônio. Categorias novas ficam disponíveis nos próximos cadastros.</p>
 </details>
+{% endif %}
 <section class="panel search-panel">
   <div class="search-heading"><div><h2>Consultar itens</h2><p>{{ items|length }} resultado(s) de {{ total }} cadastrado(s)</p></div></div>
   <form method="get" class="filter-bar" role="search">
@@ -35,16 +37,16 @@
     <a class="btn-soft" href="{{ url_for('items') }}">Limpar</a>
     <button class="btn-soft" type="submit" name="export" value="csv">↓ CSV</button>
   </form>
-  <div class="table-scroll">
+  <div class="table-scroll" role="region" tabindex="0" aria-label="Itens cadastrados">
     <table><thead><tr><th>SKU</th><th>Item</th><th>Categoria</th><th>Tipo</th><th>Condição</th><th>Un.</th><th>Mínimo</th><th>Atualizar condição</th></tr></thead>
       <tbody>{% for i in items %}<tr>
         <td><code>{{ i.sku }}</code></td><td><b>{{ i.name }}</b></td><td>{{ i.category or '-' }}</td>
         <td><span class="badge">{{ 'Estoque' if i.item_type=='STOCK' else 'Equipamento' }}</span></td>
         <td><span class="badge {{ 'green' if i.condition=='NEW' else 'amber' if i.condition=='USED' else 'red' if i.condition=='DISPOSAL' else '' }}">{{ condition_labels.get(i.condition, 'A classificar') }}</span></td>
         <td>{{ i.unit }}</td><td>{{ i.minimum_stock }}</td>
-        <td><form class="inline-condition" method="post" action="{{ url_for('item_condition', item_id=i.id) }}">
+        <td>{% if current_user.can('admin','manager','operator') %}<form class="inline-condition" method="post" action="{{ url_for('item_condition', item_id=i.id) }}">
           <select name="condition" required aria-label="Alterar condição de {{ i.name }}">{% if i.condition not in ['NEW','USED','DISPOSAL'] %}<option value="" disabled selected>Classificar...</option>{% endif %}<option value="NEW" {% if i.condition=='NEW' %}selected{% endif %}>Novo</option><option value="USED" {% if i.condition=='USED' %}selected{% endif %}>Usado</option><option value="DISPOSAL" {% if i.condition=='DISPOSAL' %}selected{% endif %}>Descarte</option></select>
-          <button type="submit" class="btn-sm">Salvar</button></form></td>
+          <button type="submit" class="btn-sm" aria-label="Salvar condição de {{ i.name }}">Salvar</button></form>{% else %}Somente leitura{% endif %}</td>
       </tr>{% else %}<tr><td colspan="8" class="empty">Nenhum item encontrado para estes filtros.</td></tr>{% endfor %}</tbody>
     </table>
   </div>
@@ -52,6 +54,7 @@
 <script>
 (function () {
   const select = document.getElementById('item-category');
+  if (!select) return;
   const field = document.getElementById('new-category-field');
   const input = document.getElementById('new-category');
   function sync() {

@@ -1,3 +1,5 @@
+> **Atualização de acessibilidade e testes (31/10/2026):** consulte `CORRECOES_ACESSIBILIDADE_E_TESTES_2026-10-31.md` para as correções, instruções de instalação e limitações dos testes.
+
 # Armazém — WMS e Gestão de Equipamentos
 
 Sistema web para rede interna que reúne controle de almoxarifado, empréstimos e locações. Desenvolvido em Python/Flask, com SQL Server em produção e SQLite disponível apenas para desenvolvimento.
